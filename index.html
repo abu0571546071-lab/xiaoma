@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>健康系统 AI 增强版 - 单机运行版</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX parsing -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Lucide Icons CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .animate-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .slide-up { animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // --- Gemini API 配置 ---
+        const apiKey = ""; 
+        const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+        const TTS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
+
+        // --- 图标组件封装 (适配 CDN 环境) ---
+        const Icon = ({ name, size = 20, className = "" }) => {
+            const [svg, setSvg] = useState("");
+            
+            useEffect(() => {
+                // 使用 lucide 全局对象创建图标
+                if (window.lucide) {
+                    const iconName = name.charAt(0).toUpperCase() + name.slice(1).replace(/-([a-z])/g, g => g[1].toUpperCase());
+                    // 动态获取图标并生成 SVG 字符串
+                    const iconNode = window.lucide[name] || window.lucide.HelpCircle;
+                    const svgString = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" 
+                        viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" 
+                        stroke-linecap="round" stroke-linejoin="round" class="${className}">
+                        ${iconNode.map(node => `<${node[0]} ${Object.entries(node[1]).map(([k,v]) => `${k}="${v}"`).join(' ')} />`).join('')}
+                        </svg>
+                    `;
+                    setSvg(svgString);
+                }
+            }, [name, size, className]);
+
+            return <span dangerouslySetInnerHTML={{ __html: svg }} />;
+        };
+
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('home');
+            const [aiModal, setAiModal] = useState({ isOpen: false, content: '', title: '', type: '' });
+            const [isLoading, setIsLoading] = useState(false);
+
+            // 指数退避重试函数
+            const fetchWithRetry = async (url, options, retries = 5, backoff = 1000) => {
+                try {
+                    const response = await fetch(`${url}?key=${apiKey}`, options);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    return await response.json();
+                } catch (error) {
+                    if (retries > 0) {
+                        await new Promise(resolve => setTimeout(resolve, backoff));
+                        return fetchWithRetry(url, options, retries - 1, backoff * 2);
+                    }
+                    throw error;
+                }
+            };
+
+            // 文字生成功能
+            const generateAIContent = async (prompt, title) => {
+                setIsLoading(true);
+                setAiModal({ isOpen: true, title, content: '正在思考中...', type: 'text' });
+                
+                try {
+                    const result = await fetchWithRetry(BASE_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: prompt }] }],
+                            systemInstruction: { parts: [{ text: "你是一个专业的健康管理AI助手，请提供简明扼要、语气亲切的建议。使用中文回答。" }] }
+                        })
+                    });
+
+                    const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "未能获取建议，请稍后再试。";
+                    setAiModal(prev => ({ ...prev, content: text }));
+                } catch (error) {
+                    setAiModal(prev => ({ ...prev, content: "获取AI建议失败，请检查网络连接。" }));
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            // 语音合成功能
+            const speakContent = async (text) => {
+                setIsLoading(true);
+                try {
+                    const result = await fetchWithRetry(TTS_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: `用温柔亲切的语气播报：${text}` }] }],
+                            generationConfig: {
+                                responseModalities: ["AUDIO"],
+                                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } }
+                            }
+                        })
+                    });
+
+                    const audioData = result.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                    if (audioData) {
+                        playPCM(audioData);
+                    }
+                } catch (error) {
+                    console.error("TTS Error", error);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const playPCM = (base64) => {
+                const binaryString = window.atob(base64);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+                const blob = new Blob([bytes], { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.play();
+            };
+
+            const renderContent = () => {
+                switch (activeTab) {
+                    case 'home': return <HomeView onAI={generateAIContent} />;
+                    case 'stats': return <StatsView onAI={generateAIContent} />;
+                    case 'activity': return <ActivityView onAI={generateAIContent} />;
+                    case 'profile': return <ProfileView />;
+                    default: return <HomeView />;
+                }
+            };
+
+            return (
+                <div className="flex flex-col h-screen bg-white text-gray-800 font-sans max-w-md mx-auto border-x border-gray-200 shadow-xl relative overflow-hidden">
+                    {/* 状态栏 */}
+                    <div className="h-6 bg-gray-50 flex justify-between items-center px-4 text-[10px] text-gray-400">
+                        <span>9:41</span>
+                        <div className="flex gap-1 items-center">
+                            <Icon name="brain-circuit" size={10} className="text-gray-300" />
+                            <div className="w-3 h-2 border border-gray-300 rounded-sm"></div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto pb-20">
+                        {renderContent()}
+                    </div>
+
+                    {/* AI 弹窗层 */}
+                    {aiModal.isOpen && (
+                        <div className="absolute inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-end animate-in">
+                            <div className="bg-white w-full rounded-t-3xl p-6 shadow-2xl max-h-[80%] overflow-y-auto slide-up">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-lg font-bold flex items-center gap-2">
+                                        <Icon name="sparkles" size={20} className="text-gray-800" />
+                                        {aiModal.title}
+                                    </h2>
+                                    <button onClick={() => setAiModal({ ...aiModal, isOpen: false })} className="p-1 hover:bg-gray-100 rounded-full">
+                                        <Icon name="x" size={20} />
+                                    </button>
+                                </div>
+                                <div className="text-sm leading-relaxed text-gray-600 whitespace-pre-wrap py-2">
+                                    {aiModal.content}
+                                </div>
+                                <div className="mt-6 flex gap-3">
+                                    <button onClick={() => setAiModal({ ...aiModal, isOpen: false })} className="flex-1 py-3 bg-gray-100 text-gray-600 rounded-xl font-medium text-sm">好的，谢谢</button>
+                                    {aiModal.type === 'text' && (
+                                        <button onClick={() => speakContent(aiModal.content)} disabled={isLoading} className="px-4 py-3 bg-gray-800 text-white rounded-xl flex items-center gap-2 disabled:opacity-50">
+                                            {isLoading ? <Icon name="loader-2" className="animate-spin" size={18} /> : <Icon name="volume-2" size={18} />}
+                                            语音播报
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 导航栏 */}
+                    <nav className="h-16 bg-white/80 backdrop-blur border-t border-gray-100 flex justify-around items-center fixed bottom-0 w-full max-w-md">
+                        <NavButton active={activeTab === 'home'} onClick={() => setActiveTab('home')} icon="home" label="首页" />
+                        <NavButton active={activeTab === 'stats'} onClick={() => setActiveTab('stats')} icon="bar-chart-2" label="统计" />
+                        <button className="flex flex-col items-center justify-center -mt-8 bg-black text-white w-14 h-14 rounded-full shadow-xl">
+                            <Icon name="plus" size={24} />
+                        </button>
+                        <NavButton active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} icon="activity" label="运动" />
+                        <NavButton active={activeTab === 'profile'} onClick={() => setActiveTab('profile')} icon="user" label="我的" />
+                    </nav>
+                </div>
+            );
+        };
+
+        const HomeView = ({ onAI }) => (
+            <div className="p-5 space-y-6">
+                <div className="flex justify-between items-center">
+                    <div><p className="text-gray-400 text-sm">3月4日 星期三</p><h1 className="text-2xl font-bold">你好，李华 👋</h1></div>
+                    <div className="p-2 border border-gray-100 rounded-full bg-gray-50"><Icon name="bell" size={20} className="text-gray-400" /></div>
+                </div>
+                <div className="bg-gray-900 text-white rounded-3xl p-6 shadow-lg relative overflow-hidden">
+                    <div className="absolute top-0 right-0 p-4 opacity-10"><Icon name="sparkles" size={80} /></div>
+                    <div className="relative z-10">
+                        <h3 className="text-lg font-bold mb-2 flex items-center gap-2">✨ 智能晨报</h3>
+                        <p className="text-gray-400 text-xs mb-4 leading-relaxed">基于您昨晚的睡眠和今早的步数，AI 已经为您准备好了今日健康攻略。</p>
+                        <button onClick={() => onAI("基于步数8432步、睡眠7小时20分，分析我的今日状态并给3个建议。", "今日智能晨报")} className="bg-white text-black px-4 py-2 rounded-xl text-xs font-bold">查看今日洞察</button>
+                    </div>
+                </div>
+                <div className="bg-gray-50 rounded-2xl p-6 border border-gray-100">
+                    <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">当前进度</p>
+                    <div className="flex justify-between items-end"><h2 className="text-4xl font-mono font-bold">8,432</h2><span className="text-sm font-bold text-gray-500 mb-1">/ 10,000 步</span></div>
+                    <div className="w-full bg-gray-200 h-2 mt-4 rounded-full overflow-hidden"><div className="bg-black h-full w-[84%] rounded-full"></div></div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                    <MetricCard icon="heart" iconColor="text-red-400" label="心率" value="72 bpm" trend="稳定" />
+                    <MetricCard icon="moon" iconColor="text-indigo-400" label="睡眠" value="7h 20m" trend="良好" />
+                </div>
+            </div>
+        );
+
+        const StatsView = ({ onAI }) => (
+            <div className="p-5 space-y-6">
+                <div className="flex justify-between items-center">
+                    <h1 className="text-xl font-bold">健康统计</h1>
+                    <button onClick={() => onAI("分析过去一周运动数据：增长12%。", "✨ 智能周报分析")} className="p-2 bg-gray-100 text-gray-800 rounded-lg border border-gray-200 flex items-center gap-1 text-[10px] font-bold"><Icon name="sparkles" size={12} />AI 洞察</button>
+                </div>
+                <div className="bg-white border border-gray-100 rounded-3xl p-6 h-64 flex flex-col justify-end">
+                    <div className="flex items-end gap-3 h-40">
+                        {[30, 60, 40, 95, 70, 85, 55].map((h, i) => (
+                            <div key={i} className={`flex-1 rounded-t-lg ${i === 3 ? 'bg-black' : 'bg-gray-200'}`} style={{ height: `${h}%` }}></div>
+                        ))}
+                    </div>
+                </div>
+                <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-2xl">
+                    <div className="flex items-center gap-2 mb-2 text-indigo-600"><Icon name="sparkles" size={14} /><span className="text-xs font-bold uppercase">AI 建议</span></div>
+                    <p className="text-xs text-indigo-900/70 leading-relaxed">您本周的活跃度比平时高出 12%。建议适当增加蛋白质摄入。</p>
+                </div>
+            </div>
+        );
+
+        const ActivityView = ({ onAI }) => (
+            <div className="p-5 space-y-6">
+                <h1 className="text-xl font-bold">开始训练</h1>
+                <div className="relative rounded-3xl overflow-hidden aspect-square bg-gray-100 border border-gray-200 flex items-center justify-center">
+                    <div className="relative text-center space-y-4">
+                        <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-2xl border-4 border-gray-50 mx-auto"><Icon name="activity" size={40} className="text-black" /></div>
+                        <button onClick={() => onAI("生成30分钟计划", "✨ AI 运动处方")} className="flex items-center gap-2 bg-black text-white px-6 py-3 rounded-2xl text-sm font-bold shadow-xl">获取智能计划</button>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const ProfileView = () => (
+            <div className="p-5 space-y-8">
+                <div className="flex items-center gap-4">
+                    <div className="w-20 h-20 bg-gray-100 rounded-full border-4 border-gray-50"></div>
+                    <div><h2 className="text-xl font-bold">李华</h2><p className="text-xs text-gray-400">已坚持健康生活 125 天</p></div>
+                </div>
+                <div className="space-y-2">
+                    <ProfileItem icon="activity" label="我的设备" sublabel="已同步 Apple Watch" />
+                    <ProfileItem icon="brain-circuit" label="AI 偏好设置" sublabel="更喜欢“温柔”的语气" />
+                </div>
+            </div>
+        );
+
+        const NavButton = ({ active, onClick, icon, label }) => (
+            <button onClick={onClick} className={`flex flex-col items-center gap-1 transition-all ${active ? 'text-black scale-110' : 'text-gray-300'}`}>
+                <Icon name={icon} size={20} />
+                <span className="text-[9px] font-bold uppercase">{label}</span>
+            </button>
+        );
+
+        const MetricCard = ({ icon, iconColor, label, value, trend }) => (
+            <div className="p-4 bg-white border border-gray-100 rounded-3xl shadow-sm">
+                <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase">{label}</span>
+                    <Icon name={icon} size={16} className={iconColor} />
+                </div>
+                <p className="text-lg font-mono font-bold">{value}</p>
+                <p className="text-[9px] text-gray-400 font-medium">状态: {trend}</p>
+            </div>
+        );
+
+        const ProfileItem = ({ icon, label, sublabel }) => (
+            <div className="flex items-center justify-between p-4 bg-gray-50/50 rounded-2xl border border-transparent hover:border-gray-100 transition-all">
+                <div className="flex items-center gap-4">
+                    <div className="p-2 bg-white rounded-xl text-gray-500 shadow-sm"><Icon name={icon} size={18} /></div>
+                    <div><p className="text-sm font-bold">{label}</p>{sublabel && <p className="text-[10px] text-gray-400">{sublabel}</p>}</div>
+                </div>
+                <Icon name="chevron-right" size={16} className="text-gray-300" />
+            </div>
+        );
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
